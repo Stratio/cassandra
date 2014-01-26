@@ -21,6 +21,7 @@ import java.io.File;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.UUID;
@@ -94,6 +95,14 @@ public class CassandraDaemon
      */
     protected void setup()
     {
+        try 
+        {
+            logger.info("Hostname: {}", InetAddress.getLocalHost().getHostName());
+        }
+        catch (UnknownHostException e1)
+        {
+            logger.info("Could not resolve local host");
+        }
         // log warnings for different kinds of sub-optimal JVMs.  tldr use 64-bit Oracle >= 1.6u32
         if (!System.getProperty("os.arch").contains("64"))
             logger.info("32bit JVM detected.  It is recommended to run Cassandra on a 64bit JVM for better performance.");
@@ -129,6 +138,20 @@ public class CassandraDaemon
      */
         logger.info("Heap size: {}/{}", Runtime.getRuntime().totalMemory(), Runtime.getRuntime().maxMemory());
         logger.info("Classpath: {}", System.getProperty("java.class.path"));
+
+        // Fail-fast if JNA is not available or failing to initialize properly
+        // except with -Dcassandra.boot_without_jna=true. See CASSANDRA-6575.
+        if (!CLibrary.jnaAvailable())
+        {
+            boolean jnaRequired = !Boolean.getBoolean("cassandra.boot_without_jna");
+
+            if (jnaRequired)
+            {
+                logger.error("JNA failing to initialize properly. Use -Dcassandra.boot_without_jna=true to bootstrap even so.");
+                System.exit(3);
+            }
+        }
+
         CLibrary.tryMlockall();
 
         Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler()
