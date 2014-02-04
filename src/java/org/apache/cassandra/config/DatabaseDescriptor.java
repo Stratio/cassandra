@@ -49,9 +49,9 @@ import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.scheduler.IRequestScheduler;
 import org.apache.cassandra.scheduler.NoScheduler;
 import org.apache.cassandra.service.CacheService;
-import org.apache.cassandra.utils.Allocator;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.memory.Pool;
 
 public class DatabaseDescriptor
 {
@@ -86,13 +86,14 @@ public class DatabaseDescriptor
     private static RequestSchedulerOptions requestSchedulerOptions;
 
     private static long keyCacheSizeInMB;
+    private static long counterCacheSizeInMB;
     private static IAllocator memoryAllocator;
     private static long indexSummaryCapacityInMB;
 
     private static String localDC;
     private static Comparator<InetAddress> localComparator;
 
-    private static Class<? extends Allocator> memtableAllocator;
+    private static Class<? extends Pool> memtablePool;
 
     static
     {
@@ -171,12 +172,12 @@ public class DatabaseDescriptor
         }
 
         if (conf.commitlog_total_space_in_mb == null)
-            conf.commitlog_total_space_in_mb = System.getProperty("os.arch").contains("64") ? 1024 : 32;
+            conf.commitlog_total_space_in_mb = hasLargeAddressSpace() ? 1024 : 32;
 
         /* evaluate the DiskAccessMode Config directive, which also affects indexAccessMode selection */
         if (conf.disk_access_mode == Config.DiskAccessMode.auto)
         {
-            conf.disk_access_mode = System.getProperty("os.arch").contains("64") ? Config.DiskAccessMode.mmap : Config.DiskAccessMode.standard;
+            conf.disk_access_mode = hasLargeAddressSpace() ? Config.DiskAccessMode.mmap : Config.DiskAccessMode.standard;
             indexAccessMode = conf.disk_access_mode;
             logger.info("DiskAccessMode 'auto' determined to be {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
         }
@@ -248,10 +249,11 @@ public class DatabaseDescriptor
             throw new ConfigurationException("concurrent_writes must be at least 2");
         }
 
-        if (conf.concurrent_replicates != null && conf.concurrent_replicates < 2)
-        {
-            throw new ConfigurationException("concurrent_replicates must be at least 2");
-        }
+        if (conf.concurrent_counter_writes != null && conf.concurrent_counter_writes < 2)
+            throw new ConfigurationException("concurrent_counter_writes must be at least 2");
+
+        if (conf.concurrent_replicates != null)
+            logger.warn("concurrent_replicates has been deprecated and should be removed from cassandra.yaml");
 
         if (conf.file_cache_size_in_mb == null)
             conf.file_cache_size_in_mb = Math.min(512, (int) (Runtime.getRuntime().maxMemory() / (4 * 1048576)));
@@ -259,8 +261,8 @@ public class DatabaseDescriptor
         if (conf.memtable_total_space_in_mb == null)
             conf.memtable_total_space_in_mb = (int) (Runtime.getRuntime().maxMemory() / (4 * 1048576));
         if (conf.memtable_total_space_in_mb <= 0)
-            throw new ConfigurationException("memtable_total_space_in_mb must be positive");
-        logger.info("Global memtable threshold is enabled at {}MB", conf.memtable_total_space_in_mb);
+            throw new ConfigurationException("memtable_heap_space_in_mb must be positive");
+        logger.info("Global memtable heap threshold is enabled at {}MB", conf.memtable_total_space_in_mb);
 
         /* Memtable flush writer threads */
         if (conf.memtable_flush_writers != null && conf.memtable_flush_writers < 1)
@@ -446,6 +448,22 @@ public class DatabaseDescriptor
                     + conf.key_cache_size_in_mb + "', supported values are <integer> >= 0.");
         }
 
+        try
+        {
+            // if counter_cache_size_in_mb option was set to "auto" then size of the cache should be "min(2.5% of Heap (in MB), 50MB)
+            counterCacheSizeInMB = (conf.counter_cache_size_in_mb == null)
+                    ? Math.min(Math.max(1, (int) (Runtime.getRuntime().totalMemory() * 0.025 / 1024 / 1024)), 50)
+                    : conf.counter_cache_size_in_mb;
+
+            if (counterCacheSizeInMB < 0)
+                throw new NumberFormatException(); // to escape duplicating error message
+        }
+        catch (NumberFormatException e)
+        {
+            throw new ConfigurationException("counter_cache_size_in_mb option was set incorrectly to '"
+                    + conf.counter_cache_size_in_mb + "', supported values are <integer> >= 0.");
+        }
+
         // if set to empty/"auto" then use 5% of Heap size
         indexSummaryCapacityInMB = (conf.index_summary_capacity_in_mb == null)
             ? Math.max(1, (int) (Runtime.getRuntime().totalMemory() * 0.05 / 1024 / 1024))
@@ -464,10 +482,10 @@ public class DatabaseDescriptor
             conf.server_encryption_options = conf.encryption_options;
         }
 
-        String allocatorClass = conf.memtable_allocator;
-        if (!allocatorClass.contains("."))
-            allocatorClass = "org.apache.cassandra.utils." + allocatorClass;
-        memtableAllocator = FBUtilities.classForName(allocatorClass, "allocator");
+        String allocatorPoolClass = conf.memtable_allocator;
+        if (!allocatorPoolClass.contains("."))
+            allocatorPoolClass = "org.apache.cassandra.utils.memory." + allocatorPoolClass;
+        memtablePool = FBUtilities.classForName(allocatorPoolClass, "allocator pool");
 
         // Hardcoded system keyspaces
         List<KSMetaData> systemKeyspaces = Arrays.asList(KSMetaData.systemKeyspace());
@@ -780,6 +798,16 @@ public class DatabaseDescriptor
         conf.write_request_timeout_in_ms = timeOutInMillis;
     }
 
+    public static long getCounterWriteRpcTimeout()
+    {
+        return conf.counter_write_request_timeout_in_ms;
+    }
+
+    public static void setCounterWriteRpcTimeout(Long timeOutInMillis)
+    {
+        conf.counter_write_request_timeout_in_ms = timeOutInMillis;
+    }
+
     public static long getCasContentionTimeout()
     {
         return conf.cas_contention_timeout_in_ms;
@@ -818,8 +846,9 @@ public class DatabaseDescriptor
                 return getTruncateRpcTimeout();
             case READ_REPAIR:
             case MUTATION:
-            case COUNTER_MUTATION:
                 return getWriteRpcTimeout();
+            case COUNTER_MUTATION:
+                return getCounterWriteRpcTimeout();
             default:
                 return getRpcTimeout();
         }
@@ -830,7 +859,12 @@ public class DatabaseDescriptor
      */
     public static long getMinRpcTimeout()
     {
-        return Longs.min(getRpcTimeout(), getReadRpcTimeout(), getRangeRpcTimeout(), getWriteRpcTimeout(), getTruncateRpcTimeout());
+        return Longs.min(getRpcTimeout(),
+                         getReadRpcTimeout(),
+                         getRangeRpcTimeout(),
+                         getWriteRpcTimeout(),
+                         getCounterWriteRpcTimeout(),
+                         getTruncateRpcTimeout());
     }
 
     public static double getPhiConvictThreshold()
@@ -853,9 +887,9 @@ public class DatabaseDescriptor
         return conf.concurrent_writes;
     }
 
-    public static int getConcurrentReplicators()
+    public static int getConcurrentCounterWriters()
     {
-        return conf.concurrent_replicates;
+        return conf.concurrent_counter_writes;
     }
 
     public static int getFlushWriters()
@@ -1201,21 +1235,9 @@ public class DatabaseDescriptor
         conf.incremental_backups = value;
     }
 
-    public static int getFlushQueueSize()
-    {
-        return conf.memtable_flush_queue_size;
-    }
-
     public static int getFileCacheSizeInMB()
     {
         return conf.file_cache_size_in_mb;
-    }
-
-    public static int getTotalMemtableSpaceInMB()
-    {
-        // should only be called if estimatesRealMemtableSize() is true
-        assert conf.memtable_total_space_in_mb > 0;
-        return conf.memtable_total_space_in_mb;
     }
 
     public static long getTotalCommitlogSpaceInMB()
@@ -1283,6 +1305,31 @@ public class DatabaseDescriptor
         return conf.row_cache_keys_to_save;
     }
 
+    public static long getCounterCacheSizeInMB()
+    {
+        return counterCacheSizeInMB;
+    }
+
+    public static int getCounterCacheSavePeriod()
+    {
+        return conf.counter_cache_save_period;
+    }
+
+    public static void setCounterCacheSavePeriod(int counterCacheSavePeriod)
+    {
+        conf.counter_cache_save_period = counterCacheSavePeriod;
+    }
+
+    public static int getCounterCacheKeysToSave()
+    {
+        return conf.counter_cache_keys_to_save;
+    }
+
+    public static void setCounterCacheKeysToSave(int counterCacheKeysToSave)
+    {
+        conf.counter_cache_keys_to_save = counterCacheKeysToSave;
+    }
+
     public static IAllocator getoffHeapMemoryAllocator()
     {
         return memoryAllocator;
@@ -1323,20 +1370,38 @@ public class DatabaseDescriptor
         return conf.preheat_kernel_page_cache;
     }
 
-    public static Allocator getMemtableAllocator()
+    public static Pool getMemtableAllocatorPool()
     {
         try
         {
-            return memtableAllocator.newInstance();
+            return memtablePool
+                   .getConstructor(long.class, float.class, Runnable.class)
+                   .newInstance(conf.memtable_total_space_in_mb << 20, conf.memtable_cleanup_threshold, new ColumnFamilyStore.FlushLargestColumnFamily());
         }
-        catch (InstantiationException | IllegalAccessException e)
+        catch (Exception e)
         {
-            throw new RuntimeException(e);
+            throw new AssertionError(e);
         }
     }
 
     public static int getIndexSummaryResizeIntervalInMinutes()
     {
         return conf.index_summary_resize_interval_in_minutes;
+    }
+
+    public static boolean hasLargeAddressSpace()
+    {
+        // currently we just check if it's a 64bit arch, but any we only really care if the address space is large
+        String datamodel = System.getProperty("sun.arch.data.model");
+        if (datamodel != null)
+        {
+            switch (datamodel)
+            {
+                case "64": return true;
+                case "32": return false;
+            }
+        }
+        String arch = System.getProperty("os.arch");
+        return arch.contains("64") || arch.contains("sparcv9");
     }
 }

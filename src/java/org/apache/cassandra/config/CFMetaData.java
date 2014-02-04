@@ -32,7 +32,6 @@ import com.google.common.collect.Maps;
 import org.apache.cassandra.db.composites.*;
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.commons.lang3.builder.EqualsBuilder;
 import org.apache.commons.lang3.builder.HashCodeBuilder;
 import org.apache.commons.lang3.builder.ToStringBuilder;
 import org.slf4j.Logger;
@@ -76,7 +75,6 @@ public final class CFMetaData
 
     public final static double DEFAULT_READ_REPAIR_CHANCE = 0.1;
     public final static double DEFAULT_DCLOCAL_READ_REPAIR_CHANCE = 0.0;
-    public final static boolean DEFAULT_REPLICATE_ON_WRITE = true;
     public final static int DEFAULT_GC_GRACE_SECONDS = 864000;
     public final static int DEFAULT_MIN_COMPACTION_THRESHOLD = 4;
     public final static int DEFAULT_MAX_COMPACTION_THRESHOLD = 32;
@@ -128,7 +126,6 @@ public final class CFMetaData
                                                                     + "comment text,"
                                                                     + "read_repair_chance double,"
                                                                     + "local_read_repair_chance double,"
-                                                                    + "replicate_on_write boolean,"
                                                                     + "gc_grace_seconds int,"
                                                                     + "default_validator text,"
                                                                     + "key_validator text,"
@@ -395,7 +392,6 @@ public final class CFMetaData
     private volatile String comment = "";
     private volatile double readRepairChance = DEFAULT_READ_REPAIR_CHANCE;
     private volatile double dcLocalReadRepairChance = DEFAULT_DCLOCAL_READ_REPAIR_CHANCE;
-    private volatile boolean replicateOnWrite = DEFAULT_REPLICATE_ON_WRITE;
     private volatile int gcGraceSeconds = DEFAULT_GC_GRACE_SECONDS;
     private volatile AbstractType<?> defaultValidator = BytesType.instance;
     private volatile AbstractType<?> keyValidator = BytesType.instance;
@@ -437,7 +433,6 @@ public final class CFMetaData
     public CFMetaData comment(String prop) { comment = enforceCommentNotNull(prop); return this;}
     public CFMetaData readRepairChance(double prop) {readRepairChance = prop; return this;}
     public CFMetaData dcLocalReadRepairChance(double prop) {dcLocalReadRepairChance = prop; return this;}
-    public CFMetaData replicateOnWrite(boolean prop) {replicateOnWrite = prop; return this;}
     public CFMetaData gcGraceSeconds(int prop) {gcGraceSeconds = prop; return this;}
     public CFMetaData defaultValidator(AbstractType<?> prop) {defaultValidator = prop; return this;}
     public CFMetaData keyValidator(AbstractType<?> prop) {keyValidator = prop; return this;}
@@ -624,7 +619,6 @@ public final class CFMetaData
                       .comment(oldCFMD.comment)
                       .readRepairChance(oldCFMD.readRepairChance)
                       .dcLocalReadRepairChance(oldCFMD.dcLocalReadRepairChance)
-                      .replicateOnWrite(oldCFMD.replicateOnWrite)
                       .gcGraceSeconds(oldCFMD.gcGraceSeconds)
                       .defaultValidator(oldCFMD.defaultValidator)
                       .keyValidator(oldCFMD.keyValidator)
@@ -689,11 +683,6 @@ public final class CFMetaData
             return ReadRepairDecision.DC_LOCAL;
 
         return ReadRepairDecision.NONE;
-    }
-
-    public boolean getReplicateOnWrite()
-    {
-        return replicateOnWrite;
     }
 
     public boolean populateIoCacheOnFlush()
@@ -861,35 +850,33 @@ public final class CFMetaData
         }
 
         CFMetaData rhs = (CFMetaData) obj;
-        return new EqualsBuilder()
-            .append(ksName, rhs.ksName)
-            .append(cfName, rhs.cfName)
-            .append(cfType, rhs.cfType)
-            .append(comparator, rhs.comparator)
-            .append(comment, rhs.comment)
-            .append(readRepairChance, rhs.readRepairChance)
-            .append(dcLocalReadRepairChance, rhs.dcLocalReadRepairChance)
-            .append(replicateOnWrite, rhs.replicateOnWrite)
-            .append(gcGraceSeconds, rhs.gcGraceSeconds)
-            .append(defaultValidator, rhs.defaultValidator)
-            .append(keyValidator, rhs.keyValidator)
-            .append(minCompactionThreshold, rhs.minCompactionThreshold)
-            .append(maxCompactionThreshold, rhs.maxCompactionThreshold)
-            .append(cfId, rhs.cfId)
-            .append(columnMetadata, rhs.columnMetadata)
-            .append(compactionStrategyClass, rhs.compactionStrategyClass)
-            .append(compactionStrategyOptions, rhs.compactionStrategyOptions)
-            .append(compressionParameters, rhs.compressionParameters)
-            .append(bloomFilterFpChance, rhs.bloomFilterFpChance)
-            .append(memtableFlushPeriod, rhs.memtableFlushPeriod)
-            .append(caching, rhs.caching)
-            .append(defaultTimeToLive, rhs.defaultTimeToLive)
-            .append(indexInterval, rhs.indexInterval)
-            .append(speculativeRetry, rhs.speculativeRetry)
-            .append(populateIoCacheOnFlush, rhs.populateIoCacheOnFlush)
-            .append(droppedColumns, rhs.droppedColumns)
-            .append(triggers, rhs.triggers)
-            .isEquals();
+        if (!ksName.equals(rhs.ksName)) return false;
+        if (!cfName.equals(rhs.cfName)) return false;
+        if (!cfType.equals(rhs.cfType)) return false;
+        if (!comparator.equals(rhs.comparator)) return false;
+        if (!Objects.equal(comment, rhs.comment)) return false;
+        if (readRepairChance != rhs.readRepairChance) return false;
+        if (dcLocalReadRepairChance != rhs.dcLocalReadRepairChance) return false;
+        if (gcGraceSeconds != rhs.gcGraceSeconds) return false;
+        if (!Objects.equal(defaultValidator, rhs.defaultValidator)) return false;
+        if (!Objects.equal(keyValidator, rhs.keyValidator)) return false;
+        if (minCompactionThreshold != rhs.minCompactionThreshold) return false;
+        if (maxCompactionThreshold != rhs.maxCompactionThreshold) return false;
+        if (!Objects.equal(cfId, rhs.cfId)) return false;
+        if (!Objects.equal(columnMetadata, rhs.columnMetadata)) return false;
+        if (!Objects.equal(compactionStrategyClass, rhs.compactionStrategyClass)) return false;
+        if (!Objects.equal(compactionStrategyOptions, rhs.compactionStrategyOptions)) return false;
+        if (!Objects.equal(compressionParameters, rhs.compressionParameters)) return false;
+        if (!Objects.equal(bloomFilterFpChance, rhs.bloomFilterFpChance)) return false;
+        if (memtableFlushPeriod != rhs.memtableFlushPeriod) return false;
+        if (!Objects.equal(caching, rhs.caching)) return false;
+        if (defaultTimeToLive != rhs.defaultTimeToLive) return false;
+        if (indexInterval != rhs.indexInterval) return false;
+        if (!Objects.equal(speculativeRetry, rhs.speculativeRetry)) return false;
+        if (populateIoCacheOnFlush != rhs.populateIoCacheOnFlush) return false;
+        if (Objects.equal(droppedColumns, rhs.droppedColumns)) return false;
+        if (Objects.equal(triggers, rhs.triggers)) return false;
+        return true;
     }
 
     public int hashCode()
@@ -902,7 +889,6 @@ public final class CFMetaData
             .append(comment)
             .append(readRepairChance)
             .append(dcLocalReadRepairChance)
-            .append(replicateOnWrite)
             .append(gcGraceSeconds)
             .append(defaultValidator)
             .append(keyValidator)
@@ -956,8 +942,6 @@ public final class CFMetaData
     {
         if (!cf_def.isSetComment())
             cf_def.setComment("");
-        if (!cf_def.isSetReplicate_on_write())
-            cf_def.setReplicate_on_write(CFMetaData.DEFAULT_REPLICATE_ON_WRITE);
         if (!cf_def.isSetPopulate_io_cache_on_flush())
             cf_def.setPopulate_io_cache_on_flush(CFMetaData.DEFAULT_POPULATE_IO_CACHE_ON_FLUSH);
         if (!cf_def.isSetMin_compaction_threshold())
@@ -1047,7 +1031,6 @@ public final class CFMetaData
 
             return newCFMD.addAllColumnDefinitions(ColumnDefinition.fromThrift(newCFMD, cf_def.column_metadata))
                           .comment(cf_def.comment)
-                          .replicateOnWrite(cf_def.replicate_on_write)
                           .defaultValidator(TypeParser.parse(cf_def.default_validation_class))
                           .compressionParameters(cp)
                           .rebuild();
@@ -1125,7 +1108,6 @@ public final class CFMetaData
         comment = enforceCommentNotNull(cfm.comment);
         readRepairChance = cfm.readRepairChance;
         dcLocalReadRepairChance = cfm.dcLocalReadRepairChance;
-        replicateOnWrite = cfm.replicateOnWrite;
         gcGraceSeconds = cfm.gcGraceSeconds;
         defaultValidator = cfm.defaultValidator;
         keyValidator = cfm.keyValidator;
@@ -1265,7 +1247,6 @@ public final class CFMetaData
         def.setComment(enforceCommentNotNull(comment));
         def.setRead_repair_chance(readRepairChance);
         def.setDclocal_read_repair_chance(dcLocalReadRepairChance);
-        def.setReplicate_on_write(replicateOnWrite);
         def.setPopulate_io_cache_on_flush(populateIoCacheOnFlush);
         def.setGc_grace_seconds(gcGraceSeconds);
         def.setDefault_validation_class(defaultValidator == null ? null : defaultValidator.toString());
@@ -1628,7 +1609,6 @@ public final class CFMetaData
         adder.add("comment", comment);
         adder.add("read_repair_chance", readRepairChance);
         adder.add("local_read_repair_chance", dcLocalReadRepairChance);
-        adder.add("replicate_on_write", replicateOnWrite);
         adder.add("populate_io_cache_on_flush", populateIoCacheOnFlush);
         adder.add("gc_grace_seconds", gcGraceSeconds);
         adder.add("default_validator", defaultValidator.toString());
@@ -1692,7 +1672,6 @@ public final class CFMetaData
 
             cfm.readRepairChance(result.getDouble("read_repair_chance"));
             cfm.dcLocalReadRepairChance(result.getDouble("local_read_repair_chance"));
-            cfm.replicateOnWrite(result.getBoolean("replicate_on_write"));
             cfm.gcGraceSeconds(result.getInt("gc_grace_seconds"));
             cfm.defaultValidator(TypeParser.parse(result.getString("default_validator")));
             cfm.keyValidator(TypeParser.parse(result.getString("key_validator")));
@@ -2172,7 +2151,6 @@ public final class CFMetaData
             .append("comment", comment)
             .append("readRepairChance", readRepairChance)
             .append("dclocalReadRepairChance", dcLocalReadRepairChance)
-            .append("replicateOnWrite", replicateOnWrite)
             .append("gcGraceSeconds", gcGraceSeconds)
             .append("defaultValidator", defaultValidator)
             .append("keyValidator", keyValidator)

@@ -68,7 +68,11 @@ public abstract class ModificationStatement implements CQLStatement, MeasurableF
 
     public long measureForPreparedCache(MemoryMeter meter)
     {
-        return meter.measureDeep(this) - meter.measureDeep(cfm);
+        return meter.measure(this)
+             + meter.measureDeep(attrs)
+             + meter.measureDeep(processedKeys)
+             + meter.measureDeep(columnOperations)
+             + (columnConditions == null ? 0 : meter.measureDeep(columnConditions));
     }
 
     public abstract boolean requireFullClusteringKey();
@@ -479,7 +483,11 @@ public abstract class ModificationStatement implements CQLStatement, MeasurableF
             throw new UnsupportedOperationException();
 
         for (IMutation mutation : getMutations(Collections.<ByteBuffer>emptyList(), true, null, queryState.getTimestamp(), false))
-            mutation.apply();
+        {
+            // We don't use counters internally.
+            assert mutation instanceof Mutation;
+            ((Mutation) mutation).apply();
+        }
         return null;
     }
 

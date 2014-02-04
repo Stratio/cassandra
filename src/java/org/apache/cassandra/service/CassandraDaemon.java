@@ -45,7 +45,6 @@ import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.Keyspace;
-import org.apache.cassandra.db.MeteredFlusher;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.compaction.CompactionManager;
@@ -104,7 +103,7 @@ public class CassandraDaemon
             logger.info("Could not resolve local host");
         }
         // log warnings for different kinds of sub-optimal JVMs.  tldr use 64-bit Oracle >= 1.6u32
-        if (!System.getProperty("os.arch").contains("64"))
+        if (!DatabaseDescriptor.hasLargeAddressSpace())
             logger.info("32bit JVM detected.  It is recommended to run Cassandra on a 64bit JVM for better performance.");
         String javaVersion = System.getProperty("java.version");
         String javaVmName = System.getProperty("java.vm.name");
@@ -138,20 +137,6 @@ public class CassandraDaemon
      */
         logger.info("Heap size: {}/{}", Runtime.getRuntime().totalMemory(), Runtime.getRuntime().maxMemory());
         logger.info("Classpath: {}", System.getProperty("java.class.path"));
-
-        // Fail-fast if JNA is not available or failing to initialize properly
-        // except with -Dcassandra.boot_without_jna=true. See CASSANDRA-6575.
-        if (!CLibrary.jnaAvailable())
-        {
-            boolean jnaRequired = !Boolean.getBoolean("cassandra.boot_without_jna");
-
-            if (jnaRequired)
-            {
-                logger.error("JNA failing to initialize properly. Use -Dcassandra.boot_without_jna=true to bootstrap even so.");
-                System.exit(3);
-            }
-        }
-
         CLibrary.tryMlockall();
 
         Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler()
@@ -271,10 +256,6 @@ public class CassandraDaemon
         {
             logger.warn("Unable to start GCInspector (currently only supported on the Sun JVM)");
         }
-
-        // MeteredFlusher can block if flush queue fills up, so don't put on scheduledTasks
-        // Start it before commit log, so memtables can flush during commit log replay
-        StorageService.optionalTasks.scheduleWithFixedDelay(new MeteredFlusher(), 1000, 1000, TimeUnit.MILLISECONDS);
 
         // replay the log if necessary
         try
@@ -486,7 +467,7 @@ public class CassandraDaemon
         final int GOSSIP_SETTLE_POLL_INTERVAL_MS = 1000;
         final int GOSSIP_SETTLE_POLL_SUCCESSES_REQUIRED = 3;
 
-        logger.info("waiting for gossip to settle before accepting client requests...");
+        logger.info("Waiting for gossip to settle before accepting client requests...");
         Uninterruptibles.sleepUninterruptibly(GOSSIP_SETTLE_MIN_WAIT_MS, TimeUnit.MILLISECONDS);
         int totalPolls = 0;
         int numOkay = 0;
@@ -500,12 +481,12 @@ public class CassandraDaemon
             totalPolls++;
             if (active == 0 && pending == 0)
             {
-                logger.debug("gossip looks settled. CompletedTasks: {}", completed);
+                logger.debug("Gossip looks settled. CompletedTasks: {}", completed);
                 numOkay++;
             }
             else
             {
-                logger.info("gossip not settled after {} polls. Gossip Stage active/pending/completed: {}/{}/{}", totalPolls, active, pending, completed);
+                logger.info("Gossip not settled after {} polls. Gossip Stage active/pending/completed: {}/{}/{}", totalPolls, active, pending, completed);
                 numOkay = 0;
             }
             if (forceAfter > 0 && totalPolls > forceAfter)
@@ -515,7 +496,10 @@ public class CassandraDaemon
                 break;
             }
         }
-        logger.info("gossip settled after {} extra polls; proceeding", totalPolls - GOSSIP_SETTLE_POLL_SUCCESSES_REQUIRED);
+        if (totalPolls > GOSSIP_SETTLE_POLL_SUCCESSES_REQUIRED)
+            logger.info("Gossip settled after {} extra polls; proceeding", totalPolls - GOSSIP_SETTLE_POLL_SUCCESSES_REQUIRED);
+        else
+            logger.debug("Gossip settled after {} extra polls; proceeding", totalPolls - GOSSIP_SETTLE_POLL_SUCCESSES_REQUIRED);
     }
 
     public static void stop(String[] args)

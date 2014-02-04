@@ -143,6 +143,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber, IFailureDe
     }
 
     private volatile State state = State.INITIALIZED;
+    private volatile boolean completeSent = false;
 
     /**
      * Create new streaming session with the peer.
@@ -312,6 +313,12 @@ public class StreamSession implements IEndpointStateChangeSubscriber, IFailureDe
     {
         state(finalState);
 
+        if (finalState == State.FAILED)
+        {
+            for (StreamReceiveTask srt : receivers.values())
+                srt.abort();
+        }
+
         // Note that we shouldn't block on this close because this method is called on the handler
         // incoming thread (so we would deadlock).
         handler.close();
@@ -359,7 +366,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber, IFailureDe
                 break;
 
             case FILE:
-                receive((FileMessage) message);
+                receive((IncomingFileMessage) message);
                 break;
 
             case RECEIVED:
@@ -458,7 +465,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber, IFailureDe
      *
      * @param message received file
      */
-    public void receive(FileMessage message)
+    public void receive(IncomingFileMessage message)
     {
         long headerSize = message.header.size();
         StreamingMetrics.totalIncomingBytes.inc(headerSize);
@@ -487,7 +494,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber, IFailureDe
      */
     public void retry(UUID cfId, int sequenceNumber)
     {
-        FileMessage message = transfers.get(cfId).createMessageForRetry(sequenceNumber);
+        OutgoingFileMessage message = transfers.get(cfId).createMessageForRetry(sequenceNumber);
         handler.sendMessage(message);
     }
 
@@ -498,6 +505,11 @@ public class StreamSession implements IEndpointStateChangeSubscriber, IFailureDe
     {
         if (state == State.WAIT_COMPLETE)
         {
+            if (!completeSent)
+            {
+                handler.sendMessage(new CompleteMessage());
+                completeSent = true;
+            }
             closeSession(State.COMPLETE);
         }
         else
@@ -586,12 +598,18 @@ public class StreamSession implements IEndpointStateChangeSubscriber, IFailureDe
         {
             if (state == State.WAIT_COMPLETE)
             {
+                if (!completeSent)
+                {
+                    handler.sendMessage(new CompleteMessage());
+                    completeSent = true;
+                }
                 closeSession(State.COMPLETE);
             }
             else
             {
                 // notify peer that this session is completed
                 handler.sendMessage(new CompleteMessage());
+                completeSent = true;
                 state(State.WAIT_COMPLETE);
             }
         }
@@ -623,7 +641,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber, IFailureDe
         state(State.STREAMING);
         for (StreamTransferTask task : transfers.values())
         {
-            Collection<FileMessage> messages = task.getFileMessages();
+            Collection<OutgoingFileMessage> messages = task.getFileMessages();
             if (messages.size() > 0)
                 handler.sendMessages(messages);
             else

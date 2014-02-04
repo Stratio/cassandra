@@ -30,6 +30,9 @@ import javax.management.openmbean.TabularData;
 import com.google.common.base.Throwables;
 import com.google.common.collect.*;
 import com.google.common.util.concurrent.RateLimiter;
+
+import org.apache.cassandra.utils.concurrent.OpOrder;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -228,13 +231,13 @@ public class CompactionManager implements CompactionManagerMBean
         executor.submit(runnable).get();
     }
 
-    public void performScrub(ColumnFamilyStore cfStore) throws InterruptedException, ExecutionException
+    public void performScrub(ColumnFamilyStore cfStore, final boolean skipCorrupted) throws InterruptedException, ExecutionException
     {
         performAllSSTableOperation(cfStore, new AllSSTablesOperation()
         {
             public void perform(ColumnFamilyStore store, Iterable<SSTableReader> sstables) throws IOException
             {
-                doScrub(store, sstables);
+                doScrub(store, sstables, skipCorrupted);
             }
         });
     }
@@ -261,7 +264,7 @@ public class CompactionManager implements CompactionManagerMBean
         });
     }
 
-    public void performCleanup(ColumnFamilyStore cfStore, final CounterId.OneShotRenewer renewer) throws InterruptedException, ExecutionException
+    public void performCleanup(ColumnFamilyStore cfStore) throws InterruptedException, ExecutionException
     {
         performAllSSTableOperation(cfStore, new AllSSTablesOperation()
         {
@@ -272,7 +275,7 @@ public class CompactionManager implements CompactionManagerMBean
                 List<SSTableReader> sortedSSTables = Lists.newArrayList(sstables);
                 Collections.sort(sortedSSTables, new SSTableReader.SizeComparator());
 
-                doCleanupCompaction(store, sortedSSTables, renewer);
+                doCleanupCompaction(store, sortedSSTables);
             }
         });
     }
@@ -417,16 +420,16 @@ public class CompactionManager implements CompactionManagerMBean
      *
      * @throws IOException
      */
-    private void doScrub(ColumnFamilyStore cfs, Iterable<SSTableReader> sstables) throws IOException
+    private void doScrub(ColumnFamilyStore cfs, Iterable<SSTableReader> sstables, boolean skipCorrupted) throws IOException
     {
         assert !cfs.isIndex();
         for (final SSTableReader sstable : sstables)
-            scrubOne(cfs, sstable);
+            scrubOne(cfs, sstable, skipCorrupted);
     }
 
-    private void scrubOne(ColumnFamilyStore cfs, SSTableReader sstable) throws IOException
+    private void scrubOne(ColumnFamilyStore cfs, SSTableReader sstable, boolean skipCorrupted) throws IOException
     {
-        Scrubber scrubber = new Scrubber(cfs, sstable);
+        Scrubber scrubber = new Scrubber(cfs, sstable, skipCorrupted);
 
         CompactionInfo.Holder scrubInfo = scrubber.getScrubInfo();
         metrics.beginCompaction(scrubInfo);
@@ -508,7 +511,7 @@ public class CompactionManager implements CompactionManagerMBean
      *
      * @throws IOException
      */
-    private void doCleanupCompaction(final ColumnFamilyStore cfs, Collection<SSTableReader> sstables, CounterId.OneShotRenewer renewer) throws IOException
+    private void doCleanupCompaction(final ColumnFamilyStore cfs, Collection<SSTableReader> sstables) throws IOException
     {
         assert !cfs.isIndex();
         Keyspace keyspace = cfs.keyspace;
@@ -520,7 +523,7 @@ public class CompactionManager implements CompactionManagerMBean
         }
 
         boolean hasIndexes = cfs.indexManager.hasIndexes();
-        CleanupStrategy cleanupStrategy = CleanupStrategy.get(cfs, ranges, renewer);
+        CleanupStrategy cleanupStrategy = CleanupStrategy.get(cfs, ranges);
 
         for (SSTableReader sstable : sstables)
         {
@@ -614,12 +617,11 @@ public class CompactionManager implements CompactionManagerMBean
 
     private static abstract class CleanupStrategy
     {
-        public static CleanupStrategy get(ColumnFamilyStore cfs, Collection<Range<Token>> ranges, CounterId.OneShotRenewer renewer)
+        public static CleanupStrategy get(ColumnFamilyStore cfs, Collection<Range<Token>> ranges)
         {
-            if (cfs.indexManager.hasIndexes() || cfs.metadata.isCounter())
-                return new Full(cfs, ranges, renewer);
-
-            return new Bounded(cfs, ranges);
+            return cfs.indexManager.hasIndexes()
+                 ? new Full(cfs, ranges)
+                 : new Bounded(cfs, ranges);
         }
 
         public abstract ICompactionScanner getScanner(SSTableReader sstable, RateLimiter limiter);
@@ -660,14 +662,12 @@ public class CompactionManager implements CompactionManagerMBean
             private final Collection<Range<Token>> ranges;
             private final ColumnFamilyStore cfs;
             private List<Cell> indexedColumnsInRow;
-            private final CounterId.OneShotRenewer renewer;
 
-            public Full(ColumnFamilyStore cfs, Collection<Range<Token>> ranges, CounterId.OneShotRenewer renewer)
+            public Full(ColumnFamilyStore cfs, Collection<Range<Token>> ranges)
             {
                 this.cfs = cfs;
                 this.ranges = ranges;
                 this.indexedColumnsInRow = null;
-                this.renewer = renewer;
             }
 
             @Override
@@ -690,8 +690,6 @@ public class CompactionManager implements CompactionManagerMBean
                 while (row.hasNext())
                 {
                     OnDiskAtom column = row.next();
-                    if (column instanceof CounterCell)
-                        renewer.maybeRenew((CounterCell) column);
 
                     if (column instanceof Cell && cfs.indexManager.indexes((Cell) column))
                     {
@@ -705,14 +703,14 @@ public class CompactionManager implements CompactionManagerMBean
                 if (indexedColumnsInRow != null && !indexedColumnsInRow.isEmpty())
                 {
                     // acquire memtable lock here because secondary index deletion may cause a race. See CASSANDRA-3712
-                    Keyspace.switchLock.readLock().lock();
+                    final OpOrder.Group opGroup = cfs.keyspace.writeOrder.start();
                     try
                     {
-                        cfs.indexManager.deleteFromIndexes(row.getKey(), indexedColumnsInRow);
+                        cfs.indexManager.deleteFromIndexes(row.getKey(), indexedColumnsInRow, opGroup);
                     }
                     finally
                     {
-                        Keyspace.switchLock.readLock().unlock();
+                        opGroup.finishOne();
                     }
                 }
                 return null;

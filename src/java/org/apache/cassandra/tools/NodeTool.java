@@ -102,6 +102,7 @@ public class NodeTool
                 GossipInfo.class,
                 InvalidateKeyCache.class,
                 InvalidateRowCache.class,
+                InvalidateCounterCache.class,
                 Join.class,
                 Move.class,
                 PauseHandoff.class,
@@ -341,6 +342,17 @@ public class NodeTool
                     probe.getCacheMetric("RowCache", "Requests"),
                     probe.getCacheMetric("RowCache", "HitRate"),
                     cacheService.getRowCacheSavePeriodInSeconds());
+
+            // Counter Cache: Hits, Requests, RecentHitRate, SavePeriodInSeconds
+            System.out.printf("%-17s: entries %d, size %d (bytes), capacity %d (bytes), %d hits, %d requests, %.3f recent hit rate, %d save period in seconds%n",
+                    "Counter Cache",
+                    probe.getCacheMetric("CounterCache", "Entries"),
+                    probe.getCacheMetric("CounterCache", "Size"),
+                    probe.getCacheMetric("CounterCache", "Capacity"),
+                    probe.getCacheMetric("CounterCache", "Hits"),
+                    probe.getCacheMetric("CounterCache", "Requests"),
+                    probe.getCacheMetric("CounterCache", "HitRate"),
+                    cacheService.getCounterCacheSavePeriodInSeconds());
 
             // Tokens
             List<String> tokens = probe.getTokens();
@@ -959,8 +971,15 @@ public class NodeTool
         @Arguments(usage = "[<keyspace> <cfnames>...]", description = "The keyspace followed by one or many column families")
         private List<String> args = new ArrayList<>();
 
-        @Option(title = "disable_snapshot", name = {"-ns", "--no-snapshot"}, description = "Scrubbed CFs will be snapshotted first, if disableSnapshot is false. (default false)")
+        @Option(title = "disable_snapshot",
+                name = {"-ns", "--no-snapshot"},
+                description = "Scrubbed CFs will be snapshotted first, if disableSnapshot is false. (default false)")
         private boolean disableSnapshot = false;
+
+        @Option(title = "skip_corrupted",
+                name = {"-s", "--skip-corrupted"},
+                description = "Skip corrupted partitions even when scrubbing counter tables. (default false)")
+        private boolean skipCorrupted = false;
 
         @Override
         public void execute(NodeProbe probe)
@@ -972,7 +991,7 @@ public class NodeTool
             {
                 try
                 {
-                    probe.scrub(disableSnapshot, keyspace, cfnames);
+                    probe.scrub(disableSnapshot, skipCorrupted, keyspace, cfnames);
                 } catch (Exception e)
                 {
                     throw new RuntimeException("Error occurred during flushing", e);
@@ -1331,6 +1350,16 @@ public class NodeTool
         }
     }
 
+    @Command(name = "invalidatecountercache", description = "Invalidate the counter cache")
+    public static class InvalidateCounterCache extends NodeToolCmd
+    {
+        @Override
+        public void execute(NodeProbe probe)
+        {
+            probe.invalidateCounterCache();
+        }
+    }
+
     @Command(name = "join", description = "Join the ring")
     public static class Join extends NodeToolCmd
     {
@@ -1532,17 +1561,20 @@ public class NodeTool
         }
     }
 
-    @Command(name = "setcachecapacity", description = "Set global key and row cache capacities (in MB units)")
+    @Command(name = "setcachecapacity", description = "Set global key, row, and counter cache capacities (in MB units)")
     public static class SetCacheCapacity extends NodeToolCmd
     {
-        @Arguments(title = "<key-cache-capacity> <row-cache-capacity>", usage = "<key-cache-capacity> <row-cache-capacity>", description = "Key cache and row cache (in MB)", required = true)
+        @Arguments(title = "<key-cache-capacity> <row-cache-capacity> <counter-cache-capacity>",
+                   usage = "<key-cache-capacity> <row-cache-capacity> <counter-cache-capacity>",
+                   description = "Key cache, row cache, and counter cache (in MB)",
+                   required = true)
         private List<Integer> args = new ArrayList<>();
 
         @Override
         public void execute(NodeProbe probe)
         {
-            checkArgument(args.size() == 2, "setcachecapacity requires key-cache-capacity, and row-cache-capacity args.");
-            probe.setCacheCapacities(args.get(0), args.get(1));
+            checkArgument(args.size() == 3, "setcachecapacity requires key-cache-capacity, row-cache-capacity, and counter-cache-capacity args.");
+            probe.setCacheCapacities(args.get(0), args.get(1), args.get(2));
         }
     }
 
@@ -2083,14 +2115,17 @@ public class NodeTool
     @Command(name = "setcachekeystosave", description = "Set number of keys saved by each cache for faster post-restart warmup. 0 to disable")
     public static class SetCacheKeysToSave extends NodeToolCmd
     {
-        @Arguments(title = "<key-cache-keys-to-save> <row-cache-keys-to-save>", usage = "<key-cache-keys-to-save> <row-cache-keys-to-save>", description = "The number of keys saved by each cache. 0 to disable", required = true)
+        @Arguments(title = "<key-cache-keys-to-save> <row-cache-keys-to-save> <counter-cache-keys-to-save>",
+                   usage = "<key-cache-keys-to-save> <row-cache-keys-to-save> <counter-cache-keys-to-save>",
+                   description = "The number of keys saved by each cache. 0 to disable",
+                   required = true)
         private List<Integer> args = new ArrayList<>();
 
         @Override
         public void execute(NodeProbe probe)
         {
-            checkArgument(args.size() == 2, "setcachekeystosave requires key-cache-keys-to-save, and row-cache-keys-to-save args.");
-            probe.setCacheKeysToSave(args.get(0), args.get(1));
+            checkArgument(args.size() == 3, "setcachekeystosave requires key-cache-keys-to-save, row-cache-keys-to-save, and counter-cache-keys-to-save args.");
+            probe.setCacheKeysToSave(args.get(0), args.get(1), args.get(2));
         }
     }
 
@@ -2169,10 +2204,10 @@ public class NodeTool
         }
     }
 
-    @Command(name = "truncatehints", description = "Truncate all hints on the local node, or truncate hints for the endpoint specified.")
+    @Command(name = "truncatehints", description = "Truncate all hints on the local node, or truncate hints for the endpoint(s) specified.")
     public static class TruncateHints extends NodeToolCmd
     {
-        @Arguments(usage = "[endpoint]", description = "Endpoint address to delete hints for, either ip address (\"127.0.0.1\") or hostname")
+        @Arguments(usage = "[endpoint ... ]", description = "Endpoint address(es) to delete hints for, either ip address (\"127.0.0.1\") or hostname")
         private String endpoint = EMPTY;
 
         @Override
